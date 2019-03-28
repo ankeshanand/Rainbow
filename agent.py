@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch import optim
 
-from model import DQN
+from model import DQN, WeightNetwork
 
 
 class Agent():
@@ -15,6 +15,8 @@ class Agent():
         self.support = torch.linspace(args.V_min, args.V_max, self.atoms).to(device=args.device)  # Support (range) of z
         self.delta_z = (args.V_max - args.V_min) / (self.atoms - 1)
         self.batch_size = args.batch_size
+        self.learn_batch_size = args.batch_size
+        self.meta_batch_size = args.replay_frequency
         self.n = args.multi_step
         self.discount = args.discount
 
@@ -23,6 +25,7 @@ class Agent():
             # Always load tensors onto CPU by default, will shift to GPU if necessary
             self.online_net.load_state_dict(torch.load(args.model, map_location='cpu'))
         self.online_net.train()
+        self.weight_network = WeightNetwork(args, self.online_net)
 
         self.target_net = DQN(args, self.action_space).to(device=args.device)
         self.update_target_net()
@@ -31,6 +34,7 @@ class Agent():
             param.requires_grad = False
 
         self.optimiser = optim.Adam(self.online_net.parameters(), lr=args.lr, eps=args.adam_eps)
+        self.meta_optimizer = optim.Adam(self.weight_network.parameters(), lr=args.meta_lr, eps=args.adam_eps)
 
     # Resets noisy weights in all linear layers (of online net only)
     def reset_noise(self):
@@ -45,10 +49,7 @@ class Agent():
     def act_e_greedy(self, state, epsilon=0.001):  # High ε can reduce evaluation scores drastically
         return np.random.randint(0, self.action_space) if np.random.random() < epsilon else self.act(state)
 
-    def learn(self, mem):
-        # Sample transitions
-        idxs, states, actions, returns, next_states, nonterminals, weights = mem.sample(self.batch_size)
-
+    def td_error(self, states, actions, returns, next_states, nonterminals):
         # Calculate current state probabilities (online network noise already sampled)
         log_ps = self.online_net(states, log=True)  # Log probabilities log p(s_t, ·; θonline)
         log_ps_a = log_ps[range(self.batch_size), actions]  # log p(s_t, a_t; θonline)
@@ -85,11 +86,30 @@ class Agent():
                                   (pns_a * (b - l.float())).view(-1))  # m_u = m_u + p(s_t+n, a*)(b - l)
 
         loss = -torch.sum(m * log_ps_a, 1)  # Cross-entropy loss (minimises DKL(m||p(s_t, a_t)))
+        return loss
+
+    def learn(self, mem):
+        # Sample transitions
+        self.batch_size = self.learn_batch_size
+        idxs, states, actions, returns, next_states, nonterminals, weights = mem.sample(self.batch_size)
+
+        loss = self.td_error(states, actions, returns, next_states, nonterminals)
+        weights = self.weight_network(states, actions.unsqueeze(dim=-1), returns.unsqueeze(dim=-1), next_states,
+                                      nonterminals)
         self.online_net.zero_grad()
-        (weights * loss).mean().backward()  # Backpropagate importance-weighted minibatch loss
+        (weights * loss).mean().backward(retain_graph=True)  # Backpropagate importance-weighted minibatch loss
         self.optimiser.step()
 
         mem.update_priorities(idxs, loss.detach().cpu().numpy())  # Update priorities of sampled transitions
+
+    def update_meta_weights(self, weight_val_mem):
+        self.batch_size = self.meta_batch_size
+        states, actions, returns, next_states, nonterminals = weight_val_mem.get_all_transitions()
+        loss = self.td_error(states, actions, returns, next_states, nonterminals)
+        self.meta_optimizer.zero_grad()
+        loss.mean().backward()
+        self.meta_optimizer.step()
+        weight_val_mem.clear()
 
     def update_target_net(self):
         self.target_net.load_state_dict(self.online_net.state_dict())

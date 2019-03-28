@@ -99,19 +99,7 @@ class ReplayMemory():
                 transition[t] = blank_trans  # If prev (next) frame is terminal
         return transition
 
-    # Returns a valid sample from a segment
-    def _get_sample_from_segment(self, segment, i):
-        valid = False
-        while not valid:
-            sample = np.random.uniform(i * segment,
-                                       (i + 1) * segment)  # Uniformly sample an element from within a segment
-            prob, idx, tree_idx = self.transitions.find(
-                sample)  # Retrieve sample from tree with un-normalised probability
-            # Resample if transition straddled current index or probablity 0
-            if (self.transitions.index - idx) % self.capacity > self.n and (
-                    idx - self.transitions.index) % self.capacity >= self.history and prob != 0:
-                valid = True  # Note that conditions are valid but extra conservative around buffer index 0
-
+    def _get_sample_from_idx(self, idx):
         # Retrieve all required transition data (from t - h to t + n)
         transition = self._get_transition(idx)
         # Create un-discretised state and nth next state
@@ -128,6 +116,22 @@ class ReplayMemory():
         nonterminal = torch.tensor([transition[self.history + self.n - 1].nonterminal], dtype=torch.float32,
                                    device=self.device)
 
+        return state, action, R, next_state, nonterminal
+
+    # Returns a valid sample from a segment
+    def _get_sample_from_segment(self, segment, i):
+        valid = False
+        while not valid:
+            sample = np.random.uniform(i * segment,
+                                       (i + 1) * segment)  # Uniformly sample an element from within a segment
+            prob, idx, tree_idx = self.transitions.find(
+                sample)  # Retrieve sample from tree with un-normalised probability
+            # Resample if transition straddled current index or probablity 0
+            if (self.transitions.index - idx) % self.capacity > self.n and (
+                    idx - self.transitions.index) % self.capacity >= self.history and prob != 0:
+                valid = True  # Note that conditions are valid but extra conservative around buffer index 0
+
+        state, action, R, next_state, nonterminal = self._get_sample_from_idx(idx)
         return prob, idx, tree_idx, state, action, R, next_state, nonterminal
 
     def sample(self, batch_size):
@@ -172,5 +176,14 @@ class ReplayMemory():
         self.current_idx += 1
         return state
 
-    def get_weights(self, batch):
-        pass
+    def clear(self):
+        self.transitions = SegmentTree(self.capacity)
+
+    def get_all_transitions(self):
+        batch = []
+        for i in range(self.capacity):
+            batch.append(self._get_sample_from_idx(i))
+        states, actions, returns, next_states, nonterminals = zip(*batch)
+        states, next_states, = torch.stack(states), torch.stack(next_states)
+        actions, returns, nonterminals = torch.cat(actions), torch.cat(returns), torch.stack(nonterminals)
+        return states, actions, returns, next_states, nonterminals

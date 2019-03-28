@@ -59,11 +59,13 @@ class DQN(nn.Module):
         self.fc_z_v = NoisyLinear(args.hidden_size, self.atoms, std_init=args.noisy_std)
         self.fc_z_a = NoisyLinear(args.hidden_size, action_space * self.atoms, std_init=args.noisy_std)
 
-    def forward(self, x, log=False):
+    def forward(self, x, log=False, only_features=False):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
         x = x.view(-1, 3136)
+        if only_features:
+            return x
         v = self.fc_z_v(F.relu(self.fc_h_v(x)))  # Value stream
         a = self.fc_z_a(F.relu(self.fc_h_a(x)))  # Advantage stream
         v, a = v.view(-1, 1, self.atoms), a.view(-1, self.action_space, self.atoms)
@@ -78,3 +80,21 @@ class DQN(nn.Module):
         for name, module in self.named_children():
             if 'fc' in name:
                 module.reset_noise()
+
+
+class WeightNetwork(nn.Module):
+    def __init__(self, args, online_net, feature_size=3136):
+        super().__init__()
+        self.online_net = online_net
+        self.hidden_size = args.hidden_size
+        self.feature_size = feature_size
+        input_size = feature_size * 2 + 1 + 1
+        self.network = nn.Sequential(
+            nn.Linear(input_size, args.hidden_size),
+            nn.ReLU(),
+            nn.Linear(args.hidden_size, 1)
+        )
+
+    def forward(self, states, actions, returns, next_states, nonterminals):
+        f1, f2 = self.online_net(states, only_features=True), self.online_net(next_states, only_features=True)
+        return self.network(torch.cat((f1, f2, actions.to(dtype=torch.float32), returns), dim=-1))

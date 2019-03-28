@@ -38,6 +38,7 @@ parser.add_argument('--target-update', type=int, default=int(32e3), metavar='τ'
                     help='Number of steps after which to update target network')
 parser.add_argument('--reward-clip', type=int, default=1, metavar='VALUE', help='Reward clipping (0 to disable)')
 parser.add_argument('--lr', type=float, default=0.0000625, metavar='η', help='Learning rate')
+parser.add_argument('--meta-lr', type=float, default=0.0000625, metavar='meta_η', help='Meta Learning rate')
 parser.add_argument('--adam-eps', type=float, default=1.5e-4, metavar='ε', help='Adam epsilon')
 parser.add_argument('--batch-size', type=int, default=32, metavar='SIZE', help='Batch size')
 parser.add_argument('--learn-start', type=int, default=int(80e3), metavar='STEPS',
@@ -83,6 +84,7 @@ priority_weight_increase = (1 - args.priority_weight) / (args.T_max - args.learn
 
 # Construct validation memory
 val_mem = ReplayMemory(args, args.evaluation_size)
+weight_val_mem = ReplayMemory(args, args.replay_frequency)
 T, done = 0, True
 while T < args.evaluation_size:
     if done:
@@ -119,8 +121,12 @@ else:
         if T >= args.learn_start:
             mem.priority_weight = min(mem.priority_weight + priority_weight_increase,
                                       1)  # Anneal importance sampling weight β to 1
+            weight_val_mem.append(state, action, reward, done)
 
             if T % args.replay_frequency == 0:
+                if weight_val_mem.transitions.full:
+                    dqn.update_meta_weights(weight_val_mem)
+                    weight_val_mem.clear()
                 dqn.learn(mem)  # Train with n-step distributional double-Q learning
 
             if T % args.evaluation_interval == 0:
